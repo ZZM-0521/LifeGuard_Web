@@ -1,0 +1,155 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>LifeGuard Pro 智慧監控面板</title>
+    <style>
+        /* ================= CSS 介面美化 ================= */
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background-color: #121212;
+            color: #ffffff;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            height: 100vh;
+            margin: 0;
+        }
+        h1 { color: #00d2ff; }
+        .dashboard {
+            display: flex;
+            gap: 20px;
+            margin-top: 30px;
+        }
+        .card {
+            background-color: #1e1e1e;
+            border: 2px solid #333;
+            border-radius: 15px;
+            padding: 30px;
+            text-align: center;
+            width: 150px;
+            box-shadow: 0 4px 15px rgba(0,0,0,0.5);
+        }
+        .card h2 { margin: 0 0 10px 0; font-size: 20px; color: #aaaaaa; }
+        .card .value { font-size: 40px; font-weight: bold; color: #ffffff; }
+        .card .unit { font-size: 16px; color: #888888; }
+        
+        /* 針對心率卡片做特別顏色 */
+        #card-heart { border-color: #ff4757; }
+        #heartRate { color: #ff4757; }
+
+        button {
+            margin-top: 40px;
+            padding: 15px 30px;
+            font-size: 18px;
+            font-weight: bold;
+            color: #fff;
+            background: linear-gradient(90deg, #00d2ff 0%, #3a7bd5 100%);
+            border: none;
+            border-radius: 30px;
+            cursor: pointer;
+            box-shadow: 0 4px 15px rgba(0, 210, 255, 0.4);
+            transition: 0.3s;
+        }
+        button:hover { transform: scale(1.05); }
+        #status { margin-top: 15px; color: #aaaaaa; }
+    </style>
+</head>
+<body>
+
+    <h1>🛡️ LifeGuard Pro 智慧監控面板</h1>
+    <div id="status">等待連線...</div>
+
+    <div class="dashboard">
+        <div class="card">
+            <h2>翻滾角 (Roll)</h2>
+            <div class="value" id="roll">0</div>
+            <div class="unit">度 (Deg)</div>
+        </div>
+        <div class="card">
+            <h2>俯仰角 (Pitch)</h2>
+            <div class="value" id="pitch">0</div>
+            <div class="unit">度 (Deg)</div>
+        </div>
+        <div class="card" id="card-heart">
+            <h2>即時心率</h2>
+            <div class="value" id="heartRate">0</div>
+            <div class="unit">BPM</div>
+        </div>
+    </div>
+
+    <button id="connectBtn">🔗 連接智慧手環</button>
+
+    <script>
+        /* ================= JavaScript 藍牙核心邏輯 ================= */
+        // 這些 UUID 必須跟我們在 ESP32-C3 程式碼裡寫的一模一樣！
+        const SERVICE_UUID = "4fafc201-1fb5-459e-8fcc-c5c9c331914b";
+        const CHARACTERISTIC_UUID = "beb5483e-36e1-4688-b7f5-ea07361b26a8";
+
+        let bluetoothDevice;
+
+        document.getElementById('connectBtn').addEventListener('click', async () => {
+            try {
+                document.getElementById('status').innerText = "正在搜尋藍牙裝置...";
+                
+                // 1. 喚起瀏覽器的藍牙配對視窗，並過濾出我們的設備
+                bluetoothDevice = await navigator.bluetooth.requestDevice({
+                    filters: [{ name: 'LifeGuard_Pro' }],
+                    optionalServices: [SERVICE_UUID]
+                });
+
+                // 2. 連接設備的 GATT 伺服器
+                const server = await bluetoothDevice.gatt.connect();
+                document.getElementById('status').innerText = "裝置已連接，正在獲取服務...";
+
+                // 3. 取得我們專屬的服務 (Service) 與 特徵值 (Characteristic)
+                const service = await server.getPrimaryService(SERVICE_UUID);
+                const characteristic = await service.getCharacteristic(CHARACTERISTIC_UUID);
+
+                // 4. 啟動資料通知 (訂閱廣播)
+                await characteristic.startNotifications();
+                
+                // 5. 每當 ESP32 傳新資料過來，就觸發 handleData 函數
+                characteristic.addEventListener('characteristicvaluechanged', handleData);
+                
+                document.getElementById('status').innerText = "✅ 連線成功！正在接收資料...";
+                document.getElementById('connectBtn').innerText = "已連線";
+                document.getElementById('connectBtn').style.background = "#28a745"; // 變成綠色
+
+                // 監聽斷線事件
+                bluetoothDevice.addEventListener('gattserverdisconnected', onDisconnected);
+
+            } catch (error) {
+                console.error("連線錯誤:", error);
+                document.getElementById('status').innerText = "❌ 連線失敗：" + error.message;
+            }
+        });
+
+        // 處理接收到的資料
+        function handleData(event) {
+            // 將藍牙傳來的二進位資料轉換回文字字串
+            const value = event.target.value;
+            const decoder = new TextDecoder('utf-8');
+            const dataString = decoder.decode(value); 
+            
+            // 此時 dataString 長這樣："R:45,P:-12,H:85"
+            // 我們用逗號把它切開，並把數值填入對應的網頁區塊
+            const parts = dataString.split(',');
+            parts.forEach(part => {
+                if(part.startsWith('R:')) document.getElementById('roll').innerText = part.substring(2);
+                if(part.startsWith('P:')) document.getElementById('pitch').innerText = part.substring(2);
+                if(part.startsWith('H:')) document.getElementById('heartRate').innerText = part.substring(2);
+            });
+        }
+
+        // 處理斷線
+        function onDisconnected() {
+            document.getElementById('status').innerText = "💔 手環已斷線，請重新連接！";
+            document.getElementById('connectBtn').innerText = "🔗 重新連接";
+            document.getElementById('connectBtn').style.background = "linear-gradient(90deg, #ff416c 0%, #ff4b2b 100%)";
+        }
+    </script>
+</body>
+</html>
